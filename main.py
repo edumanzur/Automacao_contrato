@@ -3,16 +3,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 import os
-import io # Usado para criar o arquivo em memória
+import tempfile
+import shutil
 import re
+from docx import Document
 from datetime import datetime
 from typing import Optional
 import logging
-
-# Importações para gerar PDF
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.units import inch
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -20,8 +17,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="API Processamento de Mensagens N8N",
-    description="API para processar mensagens do N8N e gerar documentos PDF",
-    version="1.1.0",
+    description="API para processar mensagens do N8N e gerar documentos DOCX",
+    version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -29,7 +26,7 @@ app = FastAPI(
 # CORS para permitir acesso do N8N
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Em produção, especifique as origens
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,10 +38,82 @@ class MensagemRequest(BaseModel):
     webhook_id: Optional[str] = None
     origem: Optional[str] = "n8n"
 
-# --- Funções de Extração de Dados (sem alteração) ---
+class MensagemResponse(BaseModel):
+    sucesso: bool
+    mensagem: str
+    dados_extraidos: dict
+    arquivo_gerado: Optional[str] = None
+
+def substituir_em_runs_preservando_tudo(paragrafos, dados):
+    """Substitui placeholders nos runs preservando formatação"""
+    for paragrafo in paragrafos:
+        texto_completo = ""
+        for run in paragrafo.runs:
+            texto_completo += run.text
+        
+        texto_modificado = texto_completo
+        substituicoes_feitas = False
+        
+        for chave, valor in dados.items():
+            placeholder = f'{{{{{chave}}}}}'
+            if placeholder in texto_modificado:
+                valor_str = str(valor) if valor is not None else ""
+                texto_modificado = texto_modificado.replace(placeholder, valor_str)
+                substituicoes_feitas = True
+                logger.info(f"Substituído: {placeholder} -> {valor_str}")
+        
+        if substituicoes_feitas:
+            for run in paragrafo.runs:
+                run.text = ""
+            
+            if not paragrafo.runs:
+                paragrafo.add_run()
+            
+            paragrafo.runs[0].text = texto_modificado
+
+def preencher_modelo(caminho_modelo, caminho_saida, dados):
+    """Preenche um modelo DOCX com os dados fornecidos"""
+    try:
+        logger.info(f"Abrindo modelo: {caminho_modelo}")
+        doc = Document(caminho_modelo)
+        
+        dados_limpos = {}
+        for chave, valor in dados.items():
+            if valor is None or valor == "":
+                dados_limpos[chave] = "Não informado"
+            else:
+                dados_limpos[chave] = str(valor)
+        
+        logger.info("Processando parágrafos principais...")
+        substituir_em_runs_preservando_tudo(doc.paragraphs, dados_limpos)
+        
+        logger.info("Processando tabelas...")
+        for tabela in doc.tables:
+            for linha in tabela.rows:
+                for celula in linha.cells:
+                    substituir_em_runs_preservando_tudo(celula.paragraphs, dados_limpos)
+        
+        logger.info("Processando cabeçalhos e rodapés...")
+        for section in doc.sections:
+            if section.header:
+                substituir_em_runs_preservando_tudo(section.header.paragraphs, dados_limpos)
+            if section.footer:
+                substituir_em_runs_preservando_tudo(section.footer.paragraphs, dados_limpos)
+        
+        logger.info(f"Salvando documento em: {caminho_saida}")
+        doc.save(caminho_saida)
+        logger.info("Arquivo gerado com sucesso!")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Erro ao preencher modelo: {str(e)}")
+        raise Exception(f"Erro ao preencher modelo: {str(e)}")
+
 def extrair_dados_da_mensagem(mensagem: str) -> dict:
     """Extrai os dados da mensagem com a estrutura especificada"""
     dados = {}
+    
     padroes = {
         "NOME": [r"Nome:\s*(.+?)(?=\n|$)", r"nome:\s*(.+?)(?=\n|$)"],
         "EMAIL": [r"Email:\s*(.+?)(?=\n|$)", r"email:\s*(.+?)(?=\n|$)", r"E-mail:\s*(.+?)(?=\n|$)"],
@@ -53,9 +122,20 @@ def extrair_dados_da_mensagem(mensagem: str) -> dict:
         "CEP": [r"CEP:\s*(.+?)(?=\n|$)", r"cep:\s*(.+?)(?=\n|$)"],
         "TELEFONE": [r"Telefone:\s*(.+?)(?=\n|$)", r"telefone:\s*(.+?)(?=\n|$)", r"Fone:\s*(.+?)(?=\n|$)"],
         "VALOR": [r"Valor:\s*(.+?)(?=\n|$)", r"valor:\s*(.+?)(?=\n|$)"],
-        "PARCELAS": [r"Quantidade de Parcelas:\s*(.+?)(?=\n|$)", r"quantidade de parcelas:\s*(.+?)(?=\n|$)"],
-        "FORMA_PAGAMENTO": [r"Forma de pagamento:\s*(.+?)(?=\n|$)", r"forma de pagamento:\s*(.+?)(?=\n|$)"]
+        "PARCELAS": [
+            r"Quantidade de Parcelas:\s*(.+?)(?=\n|$)", 
+            r"quantidade de parcelas:\s*(.+?)(?=\n|$)",
+            r"Parcelas:\s*(.+?)(?=\n|$)",
+            r"parcelas:\s*(.+?)(?=\n|$)"
+        ],
+        "FORMA_PAGAMENTO": [
+            r"Forma de pagamento:\s*(.+?)(?=\n|$)", 
+            r"forma de pagamento:\s*(.+?)(?=\n|$)",
+            r"Pagamento:\s*(.+?)(?=\n|$)",
+            r"pagamento:\s*(.+?)(?=\n|$)"
+        ]
     }
+    
     for campo, padroes_campo in padroes.items():
         valor_encontrado = None
         for padrao in padroes_campo:
@@ -63,131 +143,235 @@ def extrair_dados_da_mensagem(mensagem: str) -> dict:
             if match:
                 valor_encontrado = match.group(1).strip()
                 break
+        
         dados[campo] = valor_encontrado if valor_encontrado else "Não informado"
     
+    # Adicionar campos de data/hora automaticamente
     agora = datetime.now()
     dados["DATA"] = agora.strftime("%d/%m/%Y")
     dados["HORA"] = agora.strftime("%H:%M:%S")
     dados["DATA_HORA"] = agora.strftime("%d/%m/%Y %H:%M:%S")
+    dados["DATA_PROCESSAMENTO"] = agora.strftime("%d/%m/%Y %H:%M:%S")
+    dados["TIMESTAMP"] = agora.isoformat()
+    
+    dados["PACIENTE"] = dados["NOME"]
+    dados["ARQUIVO_FONTE"] = "API N8N Cloud"
+    
     return dados
 
-# --- NOVA FUNÇÃO PARA GERAR PDF ---
-def criar_documento_pdf(dados: dict, buffer: io.BytesIO):
-    """Cria um documento PDF simples com os dados extraídos e o salva no buffer."""
-    c = canvas.Canvas(buffer, pagesize=letter)
-    width, height = letter  # Tamanho da página
-
-    # Posição inicial
-    x = 1 * inch
-    y = height - 1 * inch
-    line_height = 20  # Espaçamento entre linhas
-
-    # Título
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(x, y, "Relatório de Dados do Cliente")
-    y -= line_height * 2
-
-    # Função auxiliar para desenhar uma linha de texto
-    def draw_line(label, value):
-        nonlocal y
-        if y < 1 * inch: # Se chegar ao final da página, cria uma nova
-            c.showPage()
-            c.setFont("Helvetica-Bold", 12)
-            y = height - 1 * inch
-        c.setFont("Helvetica-Bold", 12)
-        c.drawString(x, y, f"{label}:")
-        c.setFont("Helvetica", 12)
-        c.drawString(x + 1.5 * inch, y, str(dados.get(value, "Não informado")))
-        y -= line_height
-
-    # Escrevendo os dados no PDF
-    draw_line("Processado em", "DATA_HORA")
-    y -= line_height # Espaço extra
-
-    draw_line("Nome", "NOME")
-    draw_line("Email", "EMAIL")
-    draw_line("CPF", "CPF")
-    draw_line("Telefone", "TELEFONE")
-    y -= line_height
-
-    draw_line("Endereço", "ENDERECO")
-    draw_line("CEP", "CEP")
-    y -= line_height
-
-    draw_line("Valor", "VALOR")
-    draw_line("Parcelas", "PARCELAS")
-    draw_line("Forma de Pagamento", "FORMA_PAGAMENTO")
-
-    # Finaliza e salva o PDF
-    c.save()
-    logger.info("PDF gerado em memória com sucesso.")
-
+def criar_documento_fallback(dados: dict, output_path: str) -> None:
+    """Cria um documento DOCX simples com os dados extraídos"""
+    doc = Document()
+    
+    # Cabeçalho
+    doc.add_heading('Dados do Cliente', 0)
+    doc.add_paragraph(f'Processado em: {dados.get("DATA_HORA", "N/A")}')
+    doc.add_paragraph('---')
+    
+    # Seção de informações pessoais
+    doc.add_heading('Informações Pessoais', level=1)
+    doc.add_paragraph(f'Nome: {dados.get("NOME", "Não informado")}')
+    doc.add_paragraph(f'Email: {dados.get("EMAIL", "Não informado")}')
+    doc.add_paragraph(f'CPF: {dados.get("CPF", "Não informado")}')
+    doc.add_paragraph(f'Telefone: {dados.get("TELEFONE", "Não informado")}')
+    
+    # Seção de endereço
+    doc.add_heading('Endereço', level=1)
+    doc.add_paragraph(f'Endereço: {dados.get("ENDERECO", "Não informado")}')
+    doc.add_paragraph(f'CEP: {dados.get("CEP", "Não informado")}')
+    
+    # Seção financeira
+    doc.add_heading('Informações Financeiras', level=1)
+    doc.add_paragraph(f'Valor: {dados.get("VALOR", "Não informado")}')
+    doc.add_paragraph(f'Quantidade de Parcelas: {dados.get("PARCELAS", "Não informado")}')
+    doc.add_paragraph(f'Forma de Pagamento: {dados.get("FORMA_PAGAMENTO", "Não informado")}')
+    
+    # Adicionar data/hora
+    doc.add_heading('Informações do Processamento', level=1)
+    doc.add_paragraph(f'Data: {dados.get("DATA", "N/A")}')
+    doc.add_paragraph(f'Hora: {dados.get("HORA", "N/A")}')
+    
+    doc.save(output_path)
 
 @app.get("/")
 async def root():
-    return {"message": "API de Geração de Documentos - Agora gera PDF!"}
+    return {
+        "message": "API Processamento de Mensagens N8N - Cloud Version",
+        "version": "1.0.0",
+        "status": "online",
+        "environment": "production",
+        "timestamp": datetime.now().isoformat(),
+        "endpoints": {
+            "processar_mensagem": "POST /processar-mensagem",
+            "processar_json": "POST /processar-json", 
+            "gerar_documento": "POST /gerar-documento",
+            "webhook": "POST /webhook/processar",
+            "health": "GET /health"
+        }
+    }
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    """Health check para o N8N verificar se a API está funcionando"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "service": "processamento-mensagens-cloud",
+        "environment": "production",
+        "data_atual": datetime.now().strftime("%d/%m/%Y"),
+        "hora_atual": datetime.now().strftime("%H:%M:%S")
+    }
 
-# --- ENDPOINT MODIFICADO PARA GERAR PDF ---
 @app.post("/gerar-documento")
 async def gerar_documento(request: MensagemRequest):
-    """Endpoint para processar mensagem E gerar documento PDF"""
-    logger.info("=== INICIANDO GERAÇÃO DE DOCUMENTO PDF ===")
+    """Endpoint para processar mensagem E gerar documento DOCX"""
+    logger.info("=== GERAÇÃO DE DOCUMENTO N8N CLOUD ===")
+    logger.info(f"Data/Hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    
+    temp_dir = tempfile.mkdtemp()
+    output_path = None
     
     try:
-        # 1. Extrair dados da mensagem
+        # Extrair dados
         dados_extraidos = extrair_dados_da_mensagem(request.mensagem)
-        logger.info("Dados extraídos para o documento.")
+        logger.info("Dados extraídos para documento")
         
-        # 2. Definir nome do arquivo de saída
-        nome_cliente = re.sub(r'[^\w\-_.]', '', dados_extraidos.get("NOME", "cliente").replace(" ", "_"))
+        # Definir nome do arquivo
+        nome_cliente = dados_extraidos.get("NOME", "cliente").replace(" ", "_")
+        nome_cliente = re.sub(r'[^\w\-_.]', '', nome_cliente)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        output_filename = f"documento_{nome_cliente}_{timestamp}.pdf" # <-- Alterado para .pdf
+        output_filename = f"documento_{nome_cliente}_{timestamp}.docx"
+        output_path = os.path.join(temp_dir, output_filename)
         
         logger.info(f"Gerando documento: {output_filename}")
-
-        # 3. Criar o PDF em um buffer de memória
-        pdf_buffer = io.BytesIO()
-        criar_documento_pdf(dados_extraidos, pdf_buffer)
         
-        # Reposicionar o cursor do buffer para o início
-        pdf_buffer.seek(0)
-        pdf_content = pdf_buffer.read()
-        pdf_buffer.close()
-
-        # 4. Retornar a resposta com o conteúdo do PDF
+        try:
+            # Procurar template
+            possible_templates = [
+                "template.docx",
+                "modelo.docx",
+                "templates/template.docx",
+                "templates/modelo.docx"
+            ]
+            
+            template_encontrado = None
+            for template_path in possible_templates:
+                if os.path.exists(template_path):
+                    template_encontrado = template_path
+                    break
+            
+            if template_encontrado:
+                logger.info(f"Template encontrado: {template_encontrado}")
+                preencher_modelo(template_encontrado, output_path, dados_extraidos)
+                logger.info("Template preenchido com sucesso")
+            else:
+                logger.info("Template não encontrado, criando documento padrão")
+                criar_documento_fallback(dados_extraidos, output_path)
+                
+        except Exception as e:
+            logger.error(f"Erro no preenchimento: {e}")
+            logger.info("Criando documento fallback...")
+            criar_documento_fallback(dados_extraidos, output_path)
+        
+        # Verificar se arquivo foi criado
+        if not os.path.exists(output_path):
+            raise Exception("Documento não foi gerado")
+        
+        file_size = os.path.getsize(output_path)
+        logger.info(f"Documento criado: {file_size} bytes")
+        
+        # Ler arquivo
+        with open(output_path, "rb") as f:
+            docx_content = f.read()
+        
         return Response(
-            content=pdf_content,
-            media_type="application/pdf", # <-- Alterado para PDF
+            content=docx_content,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers={
                 "Content-Disposition": f"attachment; filename={output_filename}",
-                "Content-Length": str(len(pdf_content))
+                "Content-Length": str(len(docx_content)),
+                "Cache-Control": "no-cache"
             }
         )
         
     except Exception as e:
-        logger.error(f"ERRO CRÍTICO NA GERAÇÃO DO PDF: {e}")
+        logger.error(f"ERRO CRÍTICO: {e}")
         raise HTTPException(status_code=500, detail=f"Erro na geração do documento: {str(e)}")
+    
+    finally:
+        # Limpar arquivos temporários
+        try:
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                logger.info("Arquivos temporários removidos")
+        except Exception as e:
+            logger.warning(f"Erro na limpeza: {e}")
 
-# --- Outros endpoints (sem alteração) ---
 @app.post("/webhook/processar")
 async def webhook_processar(dados: dict):
-    logger.info("Webhook recebido, processando dados...")
-    # Esta é uma lógica de exemplo, adapte conforme necessário
+    """Endpoint específico para webhooks do N8N"""
+    logger.info("=== WEBHOOK N8N CLOUD ===")
+    logger.info(f"Data/Hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    logger.info(f"Dados recebidos: {dados}")
+    
     try:
-        mensagem_texto = dados.get("mensagem") or dados.get("message") or dados.get("texto")
+        agora = datetime.now()
+        
+        # Verificar se tem mensagem em texto
+        mensagem_texto = None
+        if "mensagem" in dados:
+            mensagem_texto = dados["mensagem"]
+        elif "message" in dados:
+            mensagem_texto = dados["message"]
+        elif "texto" in dados:
+            mensagem_texto = dados["texto"]
+        
         if mensagem_texto:
             dados_extraidos = extrair_dados_da_mensagem(mensagem_texto)
-            return {"status": "success", "dados_extraidos": dados_extraidos}
-        return {"status": "error", "message": "Nenhum texto encontrado para processar"}
+        else:
+            dados_extraidos = {
+                "NOME": dados.get("nome") or dados.get("NOME") or "Não informado",
+                "EMAIL": dados.get("email") or dados.get("EMAIL") or "Não informado",
+                "CPF": dados.get("cpf") or dados.get("CPF") or "Não informado",
+                "ENDERECO": dados.get("endereco") or dados.get("ENDERECO") or "Não informado",
+                "CEP": dados.get("cep") or dados.get("CEP") or "Não informado",
+                "TELEFONE": dados.get("telefone") or dados.get("TELEFONE") or "Não informado",
+                "VALOR": dados.get("valor") or dados.get("VALOR") or "Não informado",
+                "PARCELAS": dados.get("parcelas") or dados.get("PARCELAS") or "Não informado",
+                "FORMA_PAGAMENTO": dados.get("forma_pagamento") or dados.get("FORMA_PAGAMENTO") or "Não informado",
+                "PACIENTE": dados.get("nome") or dados.get("NOME") or "Não informado",
+                
+                "DATA": agora.strftime("%d/%m/%Y"),
+                "HORA": agora.strftime("%H:%M:%S"),
+                "DATA_HORA": agora.strftime("%d/%m/%Y %H:%M:%S"),
+                "DATA_PROCESSAMENTO": agora.strftime("%d/%m/%Y %H:%M:%S"),
+                "TIMESTAMP": agora.isoformat(),
+                "ARQUIVO_FONTE": "Webhook N8N Cloud"
+            }
+        
+        return {
+            "status": "success",
+            "message": "Dados processados com sucesso",
+            "dados": dados_extraidos,
+            "timestamp": agora.isoformat(),
+            "data_processamento": agora.strftime("%d/%m/%Y %H:%M:%S"),
+            "environment": "production"
+        }
+        
     except Exception as e:
         logger.error(f"Erro no webhook: {e}")
-        return {"status": "error", "message": str(e)}
+        return {
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
+    logger.info("🚀 Iniciando servidor FastAPI para N8N (Cloud Version)...")
+    logger.info(f"🌐 Porta: {port}")
+    logger.info(f"📅 Data atual: {datetime.now().strftime('%d/%m/%Y')}")
+    logger.info(f"🕐 Hora atual: {datetime.now().strftime('%H:%M:%S')}")
+    
     uvicorn.run(app, host="0.0.0.0", port=port)
