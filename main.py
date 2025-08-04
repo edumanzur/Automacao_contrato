@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="API Processamento de Mensagens N8N + WhatsApp",
     description="API para processar mensagens do N8N e gerar documentos DOCX para WhatsApp",
-    version="2.0.0",
+    version="2.0.1",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -58,209 +58,334 @@ class DocumentoResponse(BaseModel):
     dados_extraidos: dict
     timestamp: str
 
-def substituir_em_runs_preservando_formatacao(paragrafos, dados):
-    """Substitui placeholders nos runs preservando TODA a formatação original"""
+def substituir_placeholders_robusto(paragrafos, dados):
+    """
+    Substitui placeholders de forma mais robusta, lidando com runs fragmentados
+    """
     for paragrafo in paragrafos:
-        # Primeiro, identificar todos os placeholders no parágrafo completo
-        texto_completo = ""
-        runs_info = []
+        if not paragrafo.runs:
+            continue
+            
+        # Consolidar texto completo do parágrafo
+        texto_completo = ''.join(run.text for run in paragrafo.runs)
         
-        for i, run in enumerate(paragrafo.runs):
-            runs_info.append({
-                'index': i,
-                'text': run.text,
-                'start_pos': len(texto_completo),
-                'end_pos': len(texto_completo) + len(run.text),
-                'font': {
-                    'name': run.font.name,
-                    'size': run.font.size,
-                    'bold': run.font.bold,
-                    'italic': run.font.italic,
-                    'underline': run.font.underline,
-                    'color': run.font.color.rgb if run.font.color.rgb else None
-                }
-            })
-            texto_completo += run.text
-        
-        # Verificar se há placeholders para substituir
+        # Verificar se há placeholders no texto
         texto_modificado = texto_completo
-        substituicoes_feitas = False
-        mapa_substituicoes = []
+        houve_substituicao = False
         
         for chave, valor in dados.items():
             placeholder = f'{{{{{chave}}}}}'
+            valor_str = str(valor) if valor is not None else "Não informado"
+            
             if placeholder in texto_modificado:
-                valor_str = str(valor) if valor is not None else ""
-                
-                # Registrar posições das substituições
-                start_pos = 0
-                while True:
-                    pos = texto_modificado.find(placeholder, start_pos)
-                    if pos == -1:
-                        break
-                    
-                    mapa_substituicoes.append({
-                        'placeholder': placeholder,
-                        'valor': valor_str,
-                        'pos_inicio': pos,
-                        'pos_fim': pos + len(placeholder),
-                        'tamanho_original': len(placeholder),
-                        'tamanho_novo': len(valor_str)
-                    })
-                    
-                    start_pos = pos + 1
-                
                 texto_modificado = texto_modificado.replace(placeholder, valor_str)
-                substituicoes_feitas = True
-                logger.info(f"Substituído: {placeholder} -> {valor_str}")
+                houve_substituicao = True
+                logger.info(f"✅ Substituído: {placeholder} -> {valor_str}")
         
-        # Se houve substituições, reconstruir os runs preservando formatação
-        if substituicoes_feitas:
-            # Limpar runs existentes
+        # Se houve substituição, reconstruir o parágrafo
+        if houve_substituicao:
+            # Preservar formatação do primeiro run com conteúdo
+            formatacao_base = None
+            for run in paragrafo.runs:
+                if run.text.strip():
+                    formatacao_base = {
+                        'font_name': run.font.name,
+                        'font_size': run.font.size,
+                        'bold': run.font.bold,
+                        'italic': run.font.italic,
+                        'underline': run.font.underline,
+                        'color': run.font.color.rgb if run.font.color.rgb else None
+                    }
+                    break
+            
+            # Limpar todos os runs
             for run in paragrafo.runs:
                 run.text = ""
             
-            # Se não há runs, criar um
+            # Garantir que há pelo menos um run
             if not paragrafo.runs:
                 paragrafo.add_run()
             
-            # Método simplificado: aplicar todo o texto modificado no primeiro run
-            # e copiar a formatação do run original que continha a maior parte do placeholder
+            # Aplicar texto modificado no primeiro run
             primeiro_run = paragrafo.runs[0]
             primeiro_run.text = texto_modificado
             
-            # Tentar preservar a formatação do primeiro run não vazio original
-            for run_info in runs_info:
-                if run_info['text'].strip():  # Primeiro run com texto
-                    if run_info['font']['name']:
-                        primeiro_run.font.name = run_info['font']['name']
-                    if run_info['font']['size']:
-                        primeiro_run.font.size = run_info['font']['size']
-                    primeiro_run.font.bold = run_info['font']['bold']
-                    primeiro_run.font.italic = run_info['font']['italic']
-                    primeiro_run.font.underline = run_info['font']['underline']
-                    if run_info['font']['color']:
-                        primeiro_run.font.color.rgb = run_info['font']['color']
-                    break
+            # Aplicar formatação preservada
+            if formatacao_base:
+                try:
+                    if formatacao_base['font_name']:
+                        primeiro_run.font.name = formatacao_base['font_name']
+                    if formatacao_base['font_size']:
+                        primeiro_run.font.size = formatacao_base['font_size']
+                    primeiro_run.font.bold = formatacao_base['bold'] or False
+                    primeiro_run.font.italic = formatacao_base['italic'] or False
+                    primeiro_run.font.underline = formatacao_base['underline'] or False
+                    if formatacao_base['color']:
+                        primeiro_run.font.color.rgb = formatacao_base['color']
+                except Exception as e:
+                    logger.warning(f"Erro ao aplicar formatação: {e}")
 
-def substituir_placeholder_inteligente(paragrafos, dados):
-    """Versão melhorada que preserva formatação por meio de substituição inteligente"""
-    for paragrafo in paragrafos:
-        # Construir mapa de posições dos runs
-        posicoes_runs = []
-        texto_completo = ""
+def verificar_placeholders_no_documento(doc, dados):
+    """
+    Verifica e lista todos os placeholders encontrados no documento
+    """
+    placeholders_encontrados = set()
+    
+    # Verificar parágrafos principais
+    for paragrafo in doc.paragraphs:
+        texto = ''.join(run.text for run in paragrafo.runs)
+        matches = re.findall(r'\{\{([^}]+)\}\}', texto)
+        placeholders_encontrados.update(matches)
+    
+    # Verificar tabelas
+    for tabela in doc.tables:
+        for linha in tabela.rows:
+            for celula in linha.cells:
+                for paragrafo in celula.paragraphs:
+                    texto = ''.join(run.text for run in paragrafo.runs)
+                    matches = re.findall(r'\{\{([^}]+)\}\}', texto)
+                    placeholders_encontrados.update(matches)
+    
+    # Verificar cabeçalhos e rodapés
+    for section in doc.sections:
+        if section.header:
+            for paragrafo in section.header.paragraphs:
+                texto = ''.join(run.text for run in paragrafo.runs)
+                matches = re.findall(r'\{\{([^}]+)\}\}', texto)
+                placeholders_encontrados.update(matches)
         
-        for i, run in enumerate(paragrafo.runs):
-            inicio = len(texto_completo)
-            fim = inicio + len(run.text)
-            posicoes_runs.append({
-                'run': run,
-                'inicio': inicio,
-                'fim': fim,
-                'texto_original': run.text
-            })
-            texto_completo += run.text
-        
-        # Verificar substituições necessárias
-        substituicoes_realizadas = False
-        
-        for chave, valor in dados.items():
-            placeholder = f'{{{{{chave}}}}}'
-            valor_str = str(valor) if valor is not None else ""
+        if section.footer:
+            for paragrafo in section.footer.paragraphs:
+                texto = ''.join(run.text for run in paragrafo.runs)
+                matches = re.findall(r'\{\{([^}]+)\}\}', texto)
+                placeholders_encontrados.update(matches)
+    
+    logger.info(f"📋 Placeholders encontrados no documento: {list(placeholders_encontrados)}")
+    logger.info(f"📊 Dados disponíveis para substituição: {list(dados.keys())}")
+    
+    # Verificar quais placeholders não têm dados correspondentes
+    sem_dados = [p for p in placeholders_encontrados if p not in dados]
+    if sem_dados:
+        logger.warning(f"⚠️ Placeholders sem dados correspondentes: {sem_dados}")
+    
+    return list(placeholders_encontrados)
+
+def debug_documento_runs(doc, limite_paragrafos=5):
+    """
+    Função para debug - mostra como os runs estão organizados no documento
+    """
+    logger.info("🔍 DEBUG: Analisando estrutura de runs do documento")
+    
+    for i, paragrafo in enumerate(doc.paragraphs[:limite_paragrafos]):
+        if not paragrafo.runs:
+            continue
             
-            if placeholder in texto_completo:
-                # Encontrar qual(is) run(s) contém(êm) o placeholder
-                pos_placeholder = texto_completo.find(placeholder)
-                
-                if pos_placeholder != -1:
-                    # Identificar o run que contém o início do placeholder
-                    run_alvo = None
-                    for pos_info in posicoes_runs:
-                        if pos_info['inicio'] <= pos_placeholder < pos_info['fim']:
-                            run_alvo = pos_info['run']
-                            break
-                    
-                    if run_alvo:
-                        # Fazer a substituição preservando a formatação do run
-                        novo_texto = run_alvo.text.replace(placeholder, valor_str)
-                        run_alvo.text = novo_texto
-                        substituicoes_realizadas = True
-                        logger.info(f"Substituído {placeholder} -> {valor_str} (formatação preservada)")
+        texto_completo = ''.join(run.text for run in paragrafo.runs)
+        if '{{' in texto_completo:
+            logger.info(f"📍 Parágrafo {i}: '{texto_completo[:100]}...'")
+            logger.info(f"   Número de runs: {len(paragrafo.runs)}")
+            
+            for j, run in enumerate(paragrafo.runs):
+                if run.text:
+                    logger.info(f"   Run {j}: '{run.text}'")
 
 def preencher_modelo(caminho_modelo, caminho_saida, dados):
-    """Preenche um modelo DOCX com os dados fornecidos"""
+    """Preenche um modelo DOCX com os dados fornecidos - VERSÃO CORRIGIDA"""
     try:
-        logger.info(f"Abrindo modelo: {caminho_modelo}")
+        logger.info(f"📖 Abrindo modelo: {caminho_modelo}")
         doc = Document(caminho_modelo)
         
+        # Preparar dados - garantir que todos os valores sejam strings
         dados_limpos = {}
         for chave, valor in dados.items():
             if valor is None or valor == "":
                 dados_limpos[chave] = "Não informado"
             else:
-                dados_limpos[chave] = str(valor)
+                dados_limpos[chave] = str(valor).strip()
         
-        logger.info("Processando parágrafos principais...")
-        substituir_placeholder_inteligente(doc.paragraphs, dados_limpos)
+        logger.info(f"📋 Dados preparados para substituição:")
+        for chave, valor in dados_limpos.items():
+            logger.info(f"   {chave}: {valor}")
         
-        logger.info("Processando tabelas...")
-        for tabela in doc.tables:
-            for linha in tabela.rows:
-                for celula in linha.cells:
-                    substituir_placeholder_inteligente(celula.paragraphs, dados_limpos)
+        # Debug: verificar estrutura do documento se necessário
+        debug_documento_runs(doc, limite_paragrafos=3)
         
-        logger.info("Processando cabeçalhos e rodapés...")
-        for section in doc.sections:
+        # Verificar placeholders antes da substituição
+        placeholders_iniciais = verificar_placeholders_no_documento(doc, dados_limpos)
+        
+        # Processar parágrafos principais
+        logger.info("📄 Processando parágrafos principais...")
+        substituir_placeholders_robusto(doc.paragraphs, dados_limpos)
+        
+        # Processar tabelas
+        logger.info("📊 Processando tabelas...")
+        for i, tabela in enumerate(doc.tables):
+            for j, linha in enumerate(tabela.rows):
+                for k, celula in enumerate(linha.cells):
+                    substituir_placeholders_robusto(celula.paragraphs, dados_limpos)
+        
+        # Processar cabeçalhos e rodapés
+        logger.info("📑 Processando cabeçalhos e rodapés...")
+        for i, section in enumerate(doc.sections):
             if section.header:
-                substituir_placeholder_inteligente(section.header.paragraphs, dados_limpos)
+                substituir_placeholders_robusto(section.header.paragraphs, dados_limpos)
             if section.footer:
-                substituir_placeholder_inteligente(section.footer.paragraphs, dados_limpos)
+                substituir_placeholders_robusto(section.footer.paragraphs, dados_limpos)
         
-        logger.info(f"Salvando documento em: {caminho_saida}")
+        # Salvar documento
+        logger.info(f"💾 Salvando documento em: {caminho_saida}")
         doc.save(caminho_saida)
-        logger.info("Arquivo gerado com sucesso!")
         
+        # Verificação final
+        doc_verificacao = Document(caminho_saida)
+        placeholders_restantes = verificar_placeholders_no_documento(doc_verificacao, dados_limpos)
+        
+        if placeholders_restantes:
+            logger.warning(f"⚠️ ATENÇÃO: Ainda existem placeholders não substituídos: {placeholders_restantes}")
+            
+            # Tentar substituição adicional mais agressiva
+            logger.info("🔧 Tentando substituição adicional...")
+            for paragrafo in doc_verificacao.paragraphs:
+                texto_original = paragrafo.text
+                if '{{' in texto_original:
+                    # Substituição direta no texto do parágrafo
+                    novo_texto = texto_original
+                    for chave, valor in dados_limpos.items():
+                        placeholder = f'{{{{{chave}}}}}'
+                        if placeholder in novo_texto:
+                            novo_texto = novo_texto.replace(placeholder, valor)
+                    
+                    if novo_texto != texto_original:
+                        # Limpar runs e recriar
+                        for run in paragrafo.runs:
+                            run.text = ""
+                        if paragrafo.runs:
+                            paragrafo.runs[0].text = novo_texto
+                        else:
+                            paragrafo.add_run(novo_texto)
+                        
+                        logger.info(f"🔧 Correção aplicada: '{texto_original[:50]}...' -> '{novo_texto[:50]}...'")
+            
+            # Processar tabelas na verificação final
+            for tabela in doc_verificacao.tables:
+                for linha in tabela.rows:
+                    for celula in linha.cells:
+                        for paragrafo in celula.paragraphs:
+                            texto_original = paragrafo.text
+                            if '{{' in texto_original:
+                                novo_texto = texto_original
+                                for chave, valor in dados_limpos.items():
+                                    placeholder = f'{{{{{chave}}}}}'
+                                    if placeholder in novo_texto:
+                                        novo_texto = novo_texto.replace(placeholder, valor)
+                                
+                                if novo_texto != texto_original:
+                                    for run in paragrafo.runs:
+                                        run.text = ""
+                                    if paragrafo.runs:
+                                        paragrafo.runs[0].text = novo_texto
+                                    else:
+                                        paragrafo.add_run(novo_texto)
+                                    
+                                    logger.info(f"🔧 Correção em tabela: '{texto_original[:30]}...' -> '{novo_texto[:30]}...'")
+            
+            # Salvar novamente após correções
+            doc_verificacao.save(caminho_saida)
+            
+            # Verificação final final
+            doc_final = Document(caminho_saida)
+            placeholders_finais = verificar_placeholders_no_documento(doc_final, dados_limpos)
+            
+            if placeholders_finais:
+                logger.error(f"❌ AINDA RESTAM placeholders não substituídos: {placeholders_finais}")
+            else:
+                logger.info("✅ Correção bem-sucedida! Todos os placeholders foram substituídos.")
+        else:
+            logger.info("✅ Todos os placeholders foram substituídos com sucesso!")
+        
+        logger.info("✅ Processamento concluído!")
         return True
         
     except Exception as e:
-        logger.error(f"Erro ao preencher modelo: {str(e)}")
+        logger.error(f"❌ Erro ao preencher modelo: {str(e)}")
         raise Exception(f"Erro ao preencher modelo: {str(e)}")
 
 def extrair_dados_da_mensagem(mensagem: str) -> dict:
-    """Extrai os dados da mensagem com a estrutura especificada"""
+    """Extrai os dados da mensagem com validação aprimorada"""
     dados = {}
     
+    # Log da mensagem recebida para debug
+    logger.info(f"📨 Mensagem recebida para extração:")
+    logger.info(f"   Tamanho: {len(mensagem)} caracteres")
+    logger.info(f"   Prévia: {mensagem[:200]}...")
+    
     padroes = {
-        "NOME": [r"Nome:\s*(.+?)(?=\n|$)", r"nome:\s*(.+?)(?=\n|$)"],
-        "EMAIL": [r"Email:\s*(.+?)(?=\n|$)", r"email:\s*(.+?)(?=\n|$)", r"E-mail:\s*(.+?)(?=\n|$)"],
-        "CPF": [r"CPF:\s*(.+?)(?=\n|$)", r"cpf:\s*(.+?)(?=\n|$)"],
-        "ENDERECO": [r"Endereço:\s*(.+?)(?=\n|$)", r"endereco:\s*(.+?)(?=\n|$)", r"Endereco:\s*(.+?)(?=\n|$)"],
-        "CEP": [r"CEP:\s*(.+?)(?=\n|$)", r"cep:\s*(.+?)(?=\n|$)"],
-        "TELEFONE": [r"Telefone:\s*(.+?)(?=\n|$)", r"telefone:\s*(.+?)(?=\n|$)", r"Fone:\s*(.+?)(?=\n|$)"],
-        "VALOR": [r"Valor:\s*(.+?)(?=\n|$)", r"valor:\s*(.+?)(?=\n|$)"],
+        "NOME": [
+            r"Nome:\s*(.+?)(?=\n|$)", 
+            r"nome:\s*(.+?)(?=\n|$)",
+            r"NOME:\s*(.+?)(?=\n|$)"
+        ],
+        "EMAIL": [
+            r"Email:\s*(.+?)(?=\n|$)", 
+            r"email:\s*(.+?)(?=\n|$)", 
+            r"E-mail:\s*(.+?)(?=\n|$)",
+            r"EMAIL:\s*(.+?)(?=\n|$)"
+        ],
+        "CPF": [
+            r"CPF:\s*(.+?)(?=\n|$)", 
+            r"cpf:\s*(.+?)(?=\n|$)"
+        ],
+        "ENDERECO": [
+            r"Endereço:\s*(.+?)(?=\n|$)", 
+            r"endereco:\s*(.+?)(?=\n|$)", 
+            r"Endereco:\s*(.+?)(?=\n|$)",
+            r"ENDERECO:\s*(.+?)(?=\n|$)"
+        ],
+        "CEP": [
+            r"CEP:\s*(.+?)(?=\n|$)", 
+            r"cep:\s*(.+?)(?=\n|$)"
+        ],
+        "TELEFONE": [
+            r"Telefone:\s*(.+?)(?=\n|$)", 
+            r"telefone:\s*(.+?)(?=\n|$)", 
+            r"Fone:\s*(.+?)(?=\n|$)",
+            r"TELEFONE:\s*(.+?)(?=\n|$)"
+        ],
+        "VALOR": [
+            r"Valor:\s*(.+?)(?=\n|$)", 
+            r"valor:\s*(.+?)(?=\n|$)",
+            r"VALOR:\s*(.+?)(?=\n|$)"
+        ],
         "PARCELAS": [
             r"Quantidade de Parcelas:\s*(.+?)(?=\n|$)", 
             r"quantidade de parcelas:\s*(.+?)(?=\n|$)",
             r"Parcelas:\s*(.+?)(?=\n|$)",
-            r"parcelas:\s*(.+?)(?=\n|$)"
+            r"parcelas:\s*(.+?)(?=\n|$)",
+            r"PARCELAS:\s*(.+?)(?=\n|$)"
         ],
         "FORMA_PAGAMENTO": [
             r"Forma de pagamento:\s*(.+?)(?=\n|$)", 
             r"forma de pagamento:\s*(.+?)(?=\n|$)",
             r"Pagamento:\s*(.+?)(?=\n|$)",
-            r"pagamento:\s*(.+?)(?=\n|$)"
+            r"pagamento:\s*(.+?)(?=\n|$)",
+            r"FORMA_PAGAMENTO:\s*(.+?)(?=\n|$)"
         ]
     }
     
+    # Extrair dados usando os padrões
     for campo, padroes_campo in padroes.items():
         valor_encontrado = None
         for padrao in padroes_campo:
             match = re.search(padrao, mensagem, re.IGNORECASE | re.MULTILINE)
             if match:
                 valor_encontrado = match.group(1).strip()
+                logger.info(f"✅ {campo}: {valor_encontrado}")
                 break
         
         dados[campo] = valor_encontrado if valor_encontrado else "Não informado"
+        
+        if not valor_encontrado:
+            logger.info(f"⚠️ {campo}: Não encontrado")
     
     # Adicionar campos de data/hora automaticamente
     agora = datetime.now()
@@ -270,8 +395,13 @@ def extrair_dados_da_mensagem(mensagem: str) -> dict:
     dados["DATA_PROCESSAMENTO"] = agora.strftime("%d/%m/%Y %H:%M:%S")
     dados["TIMESTAMP"] = agora.isoformat()
     
+    # Campos derivados
     dados["PACIENTE"] = dados["NOME"]
     dados["ARQUIVO_FONTE"] = "API N8N Cloud"
+    
+    logger.info(f"📊 Resumo da extração:")
+    logger.info(f"   Total de campos extraídos: {len([v for v in dados.values() if v != 'Não informado'])}")
+    logger.info(f"   Campos sem valor: {len([v for v in dados.values() if v == 'Não informado'])}")
     
     return dados
 
@@ -313,7 +443,7 @@ def criar_documento_fallback(dados: dict, output_path: str) -> None:
 async def root():
     return {
         "message": "API Processamento de Mensagens N8N + WhatsApp - Cloud Version",
-        "version": "2.0.1",
+        "version": "2.0.2",
         "status": "online",
         "environment": "production",
         "timestamp": datetime.now().isoformat(),
@@ -322,7 +452,8 @@ async def root():
             "gerar_documento_base64": "POST /gerar-documento-base64 (retorna JSON com base64)",
             "gerar_documento_whatsapp": "POST /gerar-documento-whatsapp (otimizado para Z-API)",
             "webhook": "POST /webhook/processar",
-            "health": "GET /health"
+            "health": "GET /health",
+            "test_substituicao": "POST /test-substituicao (para debug)"
         }
     }
 
@@ -336,6 +467,36 @@ async def health_check():
         "environment": "production",
         "data_atual": datetime.now().strftime("%d/%m/%Y"),
         "hora_atual": datetime.now().strftime("%H:%M:%S")
+    }
+
+@app.post("/test-substituicao")
+async def test_substituicao():
+    """Endpoint para testar substituições de placeholder"""
+    dados_teste = {
+        "NOME": "João Silva",
+        "VALOR": "R$ 1.500,00",
+        "EMAIL": "joao@email.com",
+        "CPF": "123.456.789-00",
+        "TELEFONE": "(11) 99999-9999"
+    }
+    
+    # Teste simples de string
+    texto_teste = "Nome: {{NOME}}, Valor: {{VALOR}}, Email: {{EMAIL}}"
+    resultado_string = texto_teste
+    
+    for chave, valor in dados_teste.items():
+        placeholder = f'{{{{{chave}}}}}'
+        if placeholder in resultado_string:
+            resultado_string = resultado_string.replace(placeholder, str(valor))
+    
+    return {
+        "success": True,
+        "teste_string": {
+            "original": texto_teste,
+            "resultado": resultado_string
+        },
+        "dados_teste": dados_teste,
+        "timestamp": datetime.now().isoformat()
     }
 
 @app.post("/gerar-documento")
@@ -704,7 +865,6 @@ async def webhook_processar(dados: dict):
             "timestamp": datetime.now().isoformat()
         }
 
-# Adicionar novo endpoint específico para Z-API
 @app.post("/gerar-documento-zapi")
 async def gerar_documento_zapi(request: MensagemRequest):
     """Endpoint específico para Z-API com formato exato que ela espera"""
@@ -847,6 +1007,83 @@ async def test_docx():
         except:
             pass
 
+@app.post("/debug-template")
+async def debug_template():
+    """Endpoint para fazer debug de um template DOCX"""
+    try:
+        # Procurar template
+        possible_templates = [
+            "template.docx",
+            "modelo.docx", 
+            "templates/template.docx",
+            "templates/modelo.docx"
+        ]
+        
+        template_encontrado = None
+        for template_path in possible_templates:
+            if os.path.exists(template_path):
+                template_encontrado = template_path
+                break
+        
+        if not template_encontrado:
+            return {
+                "success": False,
+                "error": "Template não encontrado",
+                "paths_testados": possible_templates,
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # Analisar template
+        doc = Document(template_encontrado)
+        
+        # Dados de teste
+        dados_teste = {
+            "NOME": "João Silva",
+            "VALOR": "R$ 1.500,00",
+            "EMAIL": "joao@teste.com",
+            "CPF": "123.456.789-00"
+        }
+        
+        # Verificar placeholders
+        placeholders_encontrados = verificar_placeholders_no_documento(doc, dados_teste)
+        
+        # Análise de estrutura
+        analise = {
+            "template_path": template_encontrado,
+            "total_paragrafos": len(doc.paragraphs),
+            "total_tabelas": len(doc.tables),
+            "total_secoes": len(doc.sections),
+            "placeholders_encontrados": placeholders_encontrados,
+            "dados_teste": dados_teste
+        }
+        
+        # Detalhes dos primeiros parágrafos
+        paragrafos_detalhes = []
+        for i, paragrafo in enumerate(doc.paragraphs[:10]):
+            texto_completo = ''.join(run.text for run in paragrafo.runs)
+            if texto_completo.strip():
+                paragrafos_detalhes.append({
+                    "indice": i,
+                    "texto": texto_completo[:100],
+                    "tem_placeholder": '{{' in texto_completo,
+                    "num_runs": len(paragrafo.runs)
+                })
+        
+        analise["paragrafos_amostra"] = paragrafos_detalhes
+        
+        return {
+            "success": True,
+            "analise": analise,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
@@ -855,4 +1092,4 @@ if __name__ == "__main__":
     logger.info(f"📅 Data atual: {datetime.now().strftime('%d/%m/%Y')}")
     logger.info(f"🕐 Hora atual: {datetime.now().strftime('%H:%M:%S')}")
     
-    uvicorn.run(app, host="0.0.0.0", port=port) 
+    uvicorn.run(app, host="0.0.0.0", port=port)
