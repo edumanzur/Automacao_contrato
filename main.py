@@ -58,32 +58,134 @@ class DocumentoResponse(BaseModel):
     dados_extraidos: dict
     timestamp: str
 
-def substituir_em_runs_preservando_tudo(paragrafos, dados):
-    """Substitui placeholders nos runs preservando formatação"""
+def substituir_em_runs_preservando_formatacao(paragrafos, dados):
+    """Substitui placeholders nos runs preservando TODA a formatação original"""
     for paragrafo in paragrafos:
+        # Primeiro, identificar todos os placeholders no parágrafo completo
         texto_completo = ""
-        for run in paragrafo.runs:
+        runs_info = []
+        
+        for i, run in enumerate(paragrafo.runs):
+            runs_info.append({
+                'index': i,
+                'text': run.text,
+                'start_pos': len(texto_completo),
+                'end_pos': len(texto_completo) + len(run.text),
+                'font': {
+                    'name': run.font.name,
+                    'size': run.font.size,
+                    'bold': run.font.bold,
+                    'italic': run.font.italic,
+                    'underline': run.font.underline,
+                    'color': run.font.color.rgb if run.font.color.rgb else None
+                }
+            })
             texto_completo += run.text
         
+        # Verificar se há placeholders para substituir
         texto_modificado = texto_completo
         substituicoes_feitas = False
+        mapa_substituicoes = []
         
         for chave, valor in dados.items():
             placeholder = f'{{{{{chave}}}}}'
             if placeholder in texto_modificado:
                 valor_str = str(valor) if valor is not None else ""
+                
+                # Registrar posições das substituições
+                start_pos = 0
+                while True:
+                    pos = texto_modificado.find(placeholder, start_pos)
+                    if pos == -1:
+                        break
+                    
+                    mapa_substituicoes.append({
+                        'placeholder': placeholder,
+                        'valor': valor_str,
+                        'pos_inicio': pos,
+                        'pos_fim': pos + len(placeholder),
+                        'tamanho_original': len(placeholder),
+                        'tamanho_novo': len(valor_str)
+                    })
+                    
+                    start_pos = pos + 1
+                
                 texto_modificado = texto_modificado.replace(placeholder, valor_str)
                 substituicoes_feitas = True
                 logger.info(f"Substituído: {placeholder} -> {valor_str}")
         
+        # Se houve substituições, reconstruir os runs preservando formatação
         if substituicoes_feitas:
+            # Limpar runs existentes
             for run in paragrafo.runs:
                 run.text = ""
             
+            # Se não há runs, criar um
             if not paragrafo.runs:
                 paragrafo.add_run()
             
-            paragrafo.runs[0].text = texto_modificado
+            # Método simplificado: aplicar todo o texto modificado no primeiro run
+            # e copiar a formatação do run original que continha a maior parte do placeholder
+            primeiro_run = paragrafo.runs[0]
+            primeiro_run.text = texto_modificado
+            
+            # Tentar preservar a formatação do primeiro run não vazio original
+            for run_info in runs_info:
+                if run_info['text'].strip():  # Primeiro run com texto
+                    if run_info['font']['name']:
+                        primeiro_run.font.name = run_info['font']['name']
+                    if run_info['font']['size']:
+                        primeiro_run.font.size = run_info['font']['size']
+                    primeiro_run.font.bold = run_info['font']['bold']
+                    primeiro_run.font.italic = run_info['font']['italic']
+                    primeiro_run.font.underline = run_info['font']['underline']
+                    if run_info['font']['color']:
+                        primeiro_run.font.color.rgb = run_info['font']['color']
+                    break
+
+def substituir_placeholder_inteligente(paragrafos, dados):
+    """Versão melhorada que preserva formatação por meio de substituição inteligente"""
+    for paragrafo in paragrafos:
+        # Construir mapa de posições dos runs
+        posicoes_runs = []
+        texto_completo = ""
+        
+        for i, run in enumerate(paragrafo.runs):
+            inicio = len(texto_completo)
+            fim = inicio + len(run.text)
+            posicoes_runs.append({
+                'run': run,
+                'inicio': inicio,
+                'fim': fim,
+                'texto_original': run.text
+            })
+            texto_completo += run.text
+        
+        # Verificar substituições necessárias
+        substituicoes_realizadas = False
+        
+        for chave, valor in dados.items():
+            placeholder = f'{{{{{chave}}}}}'
+            valor_str = str(valor) if valor is not None else ""
+            
+            if placeholder in texto_completo:
+                # Encontrar qual(is) run(s) contém(êm) o placeholder
+                pos_placeholder = texto_completo.find(placeholder)
+                
+                if pos_placeholder != -1:
+                    # Identificar o run que contém o início do placeholder
+                    run_alvo = None
+                    for pos_info in posicoes_runs:
+                        if pos_info['inicio'] <= pos_placeholder < pos_info['fim']:
+                            run_alvo = pos_info['run']
+                            break
+                    
+                    if run_alvo:
+                        # Fazer a substituição preservando a formatação do run
+                        novo_texto = run_alvo.text.replace(placeholder, valor_str)
+                        run_alvo.text = novo_texto
+                        substituicoes_realizadas = True
+                        logger.info(f"Substituído {placeholder} -> {valor_str} (formatação preservada)")
 
 def preencher_modelo(caminho_modelo, caminho_saida, dados):
     """Preenche um modelo DOCX com os dados fornecidos"""
@@ -99,20 +201,20 @@ def preencher_modelo(caminho_modelo, caminho_saida, dados):
                 dados_limpos[chave] = str(valor)
         
         logger.info("Processando parágrafos principais...")
-        substituir_em_runs_preservando_tudo(doc.paragraphs, dados_limpos)
+        substituir_placeholder_inteligente(doc.paragraphs, dados_limpos)
         
         logger.info("Processando tabelas...")
         for tabela in doc.tables:
             for linha in tabela.rows:
                 for celula in linha.cells:
-                    substituir_em_runs_preservando_tudo(celula.paragraphs, dados_limpos)
+                    substituir_placeholder_inteligente(celula.paragraphs, dados_limpos)
         
         logger.info("Processando cabeçalhos e rodapés...")
         for section in doc.sections:
             if section.header:
-                substituir_em_runs_preservando_tudo(section.header.paragraphs, dados_limpos)
+                substituir_placeholder_inteligente(section.header.paragraphs, dados_limpos)
             if section.footer:
-                substituir_em_runs_preservando_tudo(section.footer.paragraphs, dados_limpos)
+                substituir_placeholder_inteligente(section.footer.paragraphs, dados_limpos)
         
         logger.info(f"Salvando documento em: {caminho_saida}")
         doc.save(caminho_saida)
@@ -211,7 +313,7 @@ def criar_documento_fallback(dados: dict, output_path: str) -> None:
 async def root():
     return {
         "message": "API Processamento de Mensagens N8N + WhatsApp - Cloud Version",
-        "version": "2.0.0",
+        "version": "2.0.1",
         "status": "online",
         "environment": "production",
         "timestamp": datetime.now().isoformat(),
@@ -596,6 +698,12 @@ async def webhook_processar(dados: dict):
         
     except Exception as e:
         logger.error(f"Erro no webhook: {e}")
+        return {
+            "status": "error",
+            "message": f"Erro no processamento: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }
+
 # Adicionar novo endpoint específico para Z-API
 @app.post("/gerar-documento-zapi")
 async def gerar_documento_zapi(request: MensagemRequest):
@@ -747,4 +855,4 @@ if __name__ == "__main__":
     logger.info(f"📅 Data atual: {datetime.now().strftime('%d/%m/%Y')}")
     logger.info(f"🕐 Hora atual: {datetime.now().strftime('%H:%M:%S')}")
     
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port) 
