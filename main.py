@@ -470,26 +470,55 @@ async def gerar_documento_whatsapp(request: MensagemRequest):
         file_size = os.path.getsize(output_path)
         logger.info(f"Documento criado: {file_size} bytes")
         
-        # Converter para base64 para WhatsApp
+        # Verificar se o arquivo não está corrompido
+        if file_size < 1000:  # DOCX mínimo tem pelo menos 1KB
+            raise Exception("Arquivo gerado parece estar corrompido (muito pequeno)")
+        
+        # Converter para base64 com validação
         with open(output_path, "rb") as f:
             docx_content = f.read()
+            
+            # Validar se é um arquivo DOCX válido (inicia com PK)
+            if not docx_content.startswith(b'PK'):
+                raise Exception("Arquivo gerado não é um DOCX válido")
+            
+            # Gerar base64 limpo
             base64_content = base64.b64encode(docx_content).decode('utf-8')
+            
+            # Verificar se base64 foi gerado corretamente
+            if not base64_content or len(base64_content) < 100:
+                raise Exception("Erro na codificação base64")
+            
+            logger.info(f"Base64 gerado: {len(base64_content)} caracteres")
+        
+        # Criar caption curta para WhatsApp
+        nome_curto = dados_extraidos.get('NOME', 'Cliente')[:30]
+        caption = f"📄 {nome_curto}\n📅 {dados_extraidos.get('DATA', 'N/A')} {dados_extraidos.get('HORA', 'N/A')}"
         
         # Resposta otimizada para integração com Z-API
         return {
             "success": True,
             "status": "document_ready",
             "message": "Documento gerado com sucesso para WhatsApp",
+            "file": {
+                "filename": output_filename,
+                "base64": base64_content,
+                "mimetype": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "caption": caption,
+                "size": file_size
+            },
+            # Formato alternativo para diferentes APIs
             "whatsapp_data": {
                 "filename": output_filename,
                 "base64": base64_content,
                 "mimetype": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "caption": f"📄 Documento gerado: {dados_extraidos.get('NOME', 'Cliente')}\n📅 Data: {dados_extraidos.get('DATA_HORA', 'N/A')}"
+                "caption": caption
             },
             "document_info": {
                 "filename": output_filename,
                 "file_size": file_size,
-                "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "base64_length": len(base64_content)
             },
             "dados_extraidos": dados_extraidos,
             "timestamp": datetime.now().isoformat(),
@@ -567,11 +596,148 @@ async def webhook_processar(dados: dict):
         
     except Exception as e:
         logger.error(f"Erro no webhook: {e}")
+# Adicionar novo endpoint específico para Z-API
+@app.post("/gerar-documento-zapi")
+async def gerar_documento_zapi(request: MensagemRequest):
+    """Endpoint específico para Z-API com formato exato que ela espera"""
+    logger.info("=== GERAÇÃO DE DOCUMENTO PARA Z-API ===")
+    logger.info(f"Data/Hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    
+    temp_dir = tempfile.mkdtemp()
+    
+    try:
+        # Extrair dados
+        dados_extraidos = extrair_dados_da_mensagem(request.mensagem)
+        logger.info("Dados extraídos para Z-API")
+        
+        # Nome do arquivo simplificado
+        nome_cliente = re.sub(r'[^\w]', '', dados_extraidos.get("NOME", "cliente"))[:10]
+        timestamp = datetime.now().strftime('%d%m_%H%M')
+        filename = f"{nome_cliente}_{timestamp}.docx"
+        output_path = os.path.join(temp_dir, filename)
+        
+        # Criar documento
+        try:
+            possible_templates = ["template.docx", "modelo.docx", "templates/template.docx"]
+            template_encontrado = None
+            for template_path in possible_templates:
+                if os.path.exists(template_path):
+                    template_encontrado = template_path
+                    break
+            
+            if template_encontrado:
+                preencher_modelo(template_encontrado, output_path, dados_extraidos)
+            else:
+                criar_documento_fallback(dados_extraidos, output_path)
+                
+        except Exception as e:
+            logger.error(f"Erro: {e}")
+            criar_documento_fallback(dados_extraidos, output_path)
+        
+        # Verificar arquivo
+        if not os.path.exists(output_path):
+            raise Exception("Documento não foi gerado")
+        
+        file_size = os.path.getsize(output_path)
+        if file_size < 1000:
+            raise Exception("Arquivo muito pequeno - possível corrupção")
+        
+        # Ler e validar arquivo
+        with open(output_path, "rb") as f:
+            file_bytes = f.read()
+            
+        # Validar se é DOCX válido
+        if not file_bytes.startswith(b'PK'):
+            raise Exception("Arquivo não é um DOCX válido")
+        
+        # Gerar base64 sem quebras de linha
+        base64_string = base64.b64encode(file_bytes).decode('ascii')
+        
+        # Validar base64
+        if len(base64_string) < 1000:
+            raise Exception("Base64 muito pequeno")
+        
+        # Testar se base64 pode ser decodificado
+        try:
+            base64.b64decode(base64_string)
+        except Exception:
+            raise Exception("Base64 inválido gerado")
+        
+        logger.info(f"✅ Arquivo: {filename} ({file_size} bytes)")
+        logger.info(f"✅ Base64: {len(base64_string)} caracteres")
+        
         return {
-            "status": "error",
-            "message": str(e),
+            "success": True,
+            "filename": filename,
+            "base64": base64_string,
+            "size": file_size,
+            "mimetype": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "dados": dados_extraidos,
             "timestamp": datetime.now().isoformat()
         }
+        
+    except Exception as e:
+        logger.error(f"❌ ERRO: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+    
+    finally:
+        try:
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+        except:
+            pass
+
+@app.post("/test-docx")
+async def test_docx():
+    """Endpoint para testar geração de DOCX simples"""
+    temp_dir = tempfile.mkdtemp()
+    
+    try:
+        # Criar documento de teste
+        doc = Document()
+        doc.add_heading('Teste de Documento', 0)
+        doc.add_paragraph('Este é um teste de geração de DOCX.')
+        doc.add_paragraph(f'Gerado em: {datetime.now().strftime("%d/%m/%Y %H:%M:%S")}')
+        
+        filename = f"teste_{datetime.now().strftime('%d%m%Y_%H%M%S')}.docx"
+        filepath = os.path.join(temp_dir, filename)
+        doc.save(filepath)
+        
+        # Ler arquivo
+        with open(filepath, "rb") as f:
+            file_bytes = f.read()
+        
+        # Gerar base64
+        base64_string = base64.b64encode(file_bytes).decode('ascii')
+        
+        return {
+            "success": True,
+            "message": "Teste OK",
+            "filename": filename,
+            "size": len(file_bytes),
+            "base64_length": len(base64_string),
+            "base64_preview": base64_string[:100] + "...",
+            "is_valid_docx": file_bytes.startswith(b'PK'),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+    
+    finally:
+        try:
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+        except:
+            pass
 
 if __name__ == "__main__":
     import uvicorn
