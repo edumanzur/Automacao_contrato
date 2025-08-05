@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, JSONResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 import os
 import tempfile
@@ -11,9 +11,8 @@ from datetime import datetime
 from typing import Optional
 import logging
 import base64
-import mimetypes
 
-# Configurar logging
+# Configurar logging/fastAPI (goes to core/config.py)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -34,7 +33,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Modelos Pydantic
+# Pydantic models go to ./schemas.py
 class MensagemRequest(BaseModel):
     mensagem: str
     webhook_id: Optional[str] = None
@@ -58,6 +57,7 @@ class DocumentoResponse(BaseModel):
     dados_extraidos: dict
     timestamp: str
 
+# --------- All documents related functions go to services/document_processor.py
 def substituir_placeholders_robusto(paragrafos, dados):
     """
     Substitui placeholders de forma mais robusta, lidando com runs fragmentados
@@ -439,6 +439,7 @@ def criar_documento_fallback(dados: dict, output_path: str) -> None:
     
     doc.save(output_path)
 
+# ---------- All endpoints go to router/documents.py
 @app.get("/")
 async def root():
     return {
@@ -1084,12 +1085,28 @@ async def debug_template():
             "timestamp": datetime.now().isoformat()
         }
 
+# create a main() method
 if __name__ == "__main__":
     import uvicorn
+    
+    # all this shit are going to core/config.py also.
     port = int(os.environ.get("PORT", 8000))
     logger.info("🚀 Iniciando servidor FastAPI para N8N + WhatsApp (Cloud Version)...")
     logger.info(f"🌐 Porta: {port}")
     logger.info(f"📅 Data atual: {datetime.now().strftime('%d/%m/%Y')}")
     logger.info(f"🕐 Hora atual: {datetime.now().strftime('%H:%M:%S')}")
     
+    # in main() method
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+"""
+main struct idea:
+
+import -imports-
+
+def main():
+    ...
+
+if __name__ = "__main__":
+    main()
+"""
