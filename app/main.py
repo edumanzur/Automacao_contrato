@@ -1,9 +1,18 @@
-from core import app, logger_init
+import uvicorn
+from app.settings import Settings
+
 
 def main():
-    import uvicorn
-    port = logger_init()
-    uvicorn.run(app, host="0.0.0.0", port=port)
+
+    port = Settings.PORT
+    host = Settings.HOST
     
+    uvicorn.run(
+        app="app.core.config:app",
+        host=host,
+        port=port,
+        reload=True
+    )
+
 if __name__ == "__main__":
     main()

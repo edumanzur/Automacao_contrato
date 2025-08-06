@@ -1,35 +1,46 @@
-import os
-import logging
-
+# Imported packages
 from fastapi import FastAPI
-from datetime import datetime
 from fastapi.middleware.cors import CORSMiddleware
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Native packages
+from datetime import datetime
+
+# Local packages
+from app.settings import Settings
+from app.routers.documents import router
+
 
 app = FastAPI(
-    title="API Processamento de Mensagens N8N + WhatsApp",
-    description="API para processar mensagens do N8N e gerar documentos DOCX para WhatsApp",
-    version="2.0.1",
-    docs_url="/docs",
-    redoc_url="/redoc"
+    title="Auto-bot's FastAPIs",
+    version=Settings.APP_VERSION,
+    docs_url="/docs"
 )
 
-# CORS para permitir acesso do N8N
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Em produção, especifique as origens
+    allow_origins=["*"],       # TODO: Create a list with all allowed origins for better security
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-def logger_init():
-    port = int(os.environ.get("PORT", 8000))
-    logger.info("🚀 Iniciando servidor FastAPI para N8N + WhatsApp (Cloud Version)...")
-    logger.info(f"🌐 Porta: {port}")
-    logger.info(f"📅 Data atual: {datetime.now().strftime('%d/%m/%Y')}")
-    logger.info(f"🕐 Hora atual: {datetime.now().strftime('%H:%M:%S')}")
-    
-    return port
+
+app.include_router(router)
+
+
+@app.get("/")
+def root():
+    return {
+        "api_name": "Auto-bots API server",
+        "contributors": "Edu viadinho, Becker, Gui da Gaita",
+        "license_copyrights": "all rights reserved, 06/2025",
+        "version": Settings.APP_VERSION,
+        "status": "online",
+        "environment": "production",
+        "timestamp": datetime.now().isoformat(),
+        "endpoints": {
+            "GET /": "Core program info (this endpoint)",
+            "GET /documents": "Core documents functionalities and endpoints",
+        }
+    }
