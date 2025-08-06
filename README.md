@@ -16,7 +16,14 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## 3) Executar o servidor
+## 3) Setup da .env
+
+Criar uma .env com:
+
+- HOST
+- PORT
+
+## 4) Executar o servidor
 
 - Opção A — usando o script (Windows)
   - Basta rodar o arquivo run-server.bat.
