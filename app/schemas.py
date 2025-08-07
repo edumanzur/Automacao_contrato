@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from enum import Enum
 
 class MensagemRequest(BaseModel):
     mensagem: str
@@ -22,3 +23,17 @@ class DocumentoResponse(BaseModel):
     download_url: str | None = None
     dados_extraidos: dict
     timestamp: str
+
+
+class TestPlaceHolder(BaseModel):
+    name: str
+    price: str
+    email: str
+    cpf: str
+    cellphone: str
+
+
+# TODO: create enum of possible .docx name ("templates(testing)", "contract", "finance"...)
+class DocxNames(Enum):
+    TEMPLATE = "template.docx"
+    MODELO = "modelo.docx"

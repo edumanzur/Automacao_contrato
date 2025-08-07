@@ -12,6 +12,7 @@ from fastapi.responses import Response
 from docx import Document
 
 # local packages
+from app.schemas import TestPlaceHolder
 from app.services import document_processor
 from app.core import logger
 
@@ -20,56 +21,28 @@ router = APIRouter(prefix="/documents")
 
 
 @router.get("/")
-def root():
+async def root():
     return {
-        "message": "N8N + WhatsApp Cloud API",
-        "version": "2.0.2",
-        "status": "online",
-        "environment": "production",
-        "timestamp": "datetime.now().isoformat()",
-        "endpoints": {
-            "generate_document": "POST /generate-document (returns binary)",
-            "generate_document_base64": "POST /generate-document-base64 (returns JSON with base64)",
-            "generate_document_whatsapp": "POST /generate-document-whatsapp (optimized for Z-API)",
-            "webhook": "POST /webhook/process",
-            "health": "GET /health",
-            "test_substitution": "POST /test-substitution (for debug)"
-        }
+        "TODO": "Describe all endpoints here"
     }
 
 
-# @app.post("/test-substituicao")
-# async def test_substituicao():
-#     """Endpoint para testar substituições de placeholder"""
-#     dados_teste = {
-#         "NOME": "João Silva",
-#         "VALOR": "R$ 1.500,00",
-#         "EMAIL": "joao@email.com",
-#         "CPF": "123.456.789-00",
-#         "TELEFONE": "(11) 99999-9999"
-#     }
-    
-#     # Teste simples de string
-#     texto_teste = "Nome: {{NOME}}, Valor: {{VALOR}}, Email: {{EMAIL}}"
-#     resultado_string = texto_teste
-    
-#     for chave, valor in dados_teste.items():
-#         placeholder = f'{{{{{chave}}}}}'
-#         if placeholder in resultado_string:
-#             resultado_string = resultado_string.replace(placeholder, str(valor))
-    
-#     return {
-#         "success": True,
-#         "teste_string": {
-#             "original": texto_teste,
-#             "resultado": resultado_string
-#         },
-#         "dados_teste": dados_teste,
-#         "timestamp": datetime.now().isoformat()
-#     }
+@router.post("/test-placeholder")
+async def test_placeholder(body: TestPlaceHolder):
+    """
+    Test endpoint for placeholder, raw-request-body:
+        {
+            "name": "Edu",
+            "price": "R$ 1.500,00",
+            "email": "edu@ceub.com",
+            "cpf": "123.456.789-00",
+            "cellphone": "(61) 99999-9999"
+        }
+    """
+    return document_processor.test_placeholder_response(body)
 
 
-# @app.post("/gerar-documento")
+# @router.post("/gerar-documento")
 # async def gerar_documento(request: MensagemRequest):
 #     """Endpoint para processar mensagem E gerar documento DOCX (retorna binário)"""
 #     logger.info("=== GERAÇÃO DE DOCUMENTO N8N CLOUD (BINÁRIO) ===")
@@ -157,7 +130,7 @@ def root():
 #             logger.warning(f"Erro na limpeza: {e}")
 
 
-# @app.post("/gerar-documento-base64", response_model=DocumentoResponse)
+# @router.post("/gerar-documento-base64", response_model=DocumentoResponse)
 # async def gerar_documento_base64(request: MensagemRequest):
 #     """Endpoint que retorna o documento em base64 (ideal para integração com APIs)"""
 #     logger.info("=== GERAÇÃO DE DOCUMENTO N8N CLOUD (BASE64) ===")
@@ -247,7 +220,7 @@ def root():
 #             logger.warning(f"Erro na limpeza: {e}")
 
 
-# @app.post("/gerar-documento-whatsapp")
+# @router.post("/gerar-documento-whatsapp")
 # async def gerar_documento_whatsapp(request: MensagemRequest):
 #     """Endpoint otimizado para envio via WhatsApp usando Z-API"""
 #     logger.info("=== GERAÇÃO DE DOCUMENTO PARA WHATSAPP ===")
@@ -379,7 +352,7 @@ def root():
 #             logger.warning(f"Erro na limpeza: {e}")
 
 
-# @app.post("/webhook/processar")
+# @router.post("/webhook/processar")
 # async def webhook_processar(dados: dict):
 #     """Endpoint específico para webhooks do N8N"""
 #     logger.info("=== WEBHOOK N8N CLOUD ===")
@@ -439,7 +412,7 @@ def root():
 #         }
 
 
-# @app.post("/gerar-documento-zapi")
+# @router.post("/gerar-documento-zapi")
 # async def gerar_documento_zapi(request: MensagemRequest):
 #     """Endpoint específico para Z-API com formato exato que ela espera"""
 #     logger.info("=== GERAÇÃO DE DOCUMENTO PARA Z-API ===")
@@ -534,7 +507,7 @@ def root():
 #             pass
 
 
-# @app.post("/test-docx")
+# @router.post("/test-docx")
 # async def test_docx():
 #     """Endpoint para testar geração de DOCX simples"""
 #     temp_dir = tempfile.mkdtemp()
@@ -584,7 +557,7 @@ def root():
 
 
 # # check if .docx is valid
-# @app.post("/debug-template")
+# @router.post("/debug-template")
 # async def debug_template():
 #     """Endpoint para fazer debug de um template DOCX"""
 #     try:

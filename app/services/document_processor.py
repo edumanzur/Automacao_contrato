@@ -1,8 +1,39 @@
+# Native packages
 import re
-from core import logger
-from docx import Document
 from datetime import datetime
 
+# Imported packages
+from docx import Document
+
+# local packages
+from app.core import logger
+from app.schemas import TestPlaceHolder 
+
+
+def test_placeholder_response(body: TestPlaceHolder):
+    test_model = "Nome: {{name}}, Valor: {{price}}, Email: {{email}}"
+    post_parser = "Nome: {{name}}, Valor: {{price}}, Email: {{email}}"
+    for key, value in body:
+        placeholder = f'{{{{{key}}}}}'
+        if placeholder in post_parser:
+            post_parser = post_parser.replace(placeholder, str(value))
+    
+    success = False
+    if (re.search(r"\{\{\w+\}\}", post_parser) is None):
+        success = True
+    
+    return {
+        "success": success,
+        "test_parser": {
+            "original": body,
+            "post_parser": post_parser
+        },
+        "test_model": test_model,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+# TODO: return missing fields in client message (method).
 def substituir_placeholders_robusto(paragrafos, dados):
     """
     Substitui placeholders de forma mais robusta, lidando com runs fragmentados
